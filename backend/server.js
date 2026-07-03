@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const assessmentRoutes = require('./routes/assessmentRoutes');
+const feedbackRoutes = require('./routes/feedbackRoutes');
+const historyRoutes = require('./routes/historyRoutes');
 
 dotenv.config();
 
@@ -11,13 +13,13 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// API Domain Segregation
 app.use('/api/assessment', assessmentRoutes);
+app.use('/api/feedback', feedbackRoutes);
+app.use('/api/history', historyRoutes);
 
-// Global Error Interceptor Boundary
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ success: false, message: 'Uncaught operational systemic failure encountered.' });
+  res.status(500).json({ success: false, message: 'Uncaught operational systemic architecture exception.' });
 });
 
 app.listen(PORT, () => {

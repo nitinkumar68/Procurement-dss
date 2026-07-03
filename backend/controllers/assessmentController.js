@@ -1,61 +1,134 @@
+/**
+ * assessmentController.js
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Handles POST /api/assessment
+ *
+ * Flow:
+ *   1. Validate input (done by Zod middleware in the route)
+ *   2. Run determineProcurementModel() — pure rule-based logic, always reliable
+ *   3. Call generateCopilotJustification() — live AI or heuristic fallback
+ *   4. Persist the full result to PostgreSQL
+ *   5. Return the result to the frontend
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+'use strict';
+
 const pool = require('../config/db');
+const { generateCopilotJustification } = require('../services/copilotService');
 
-// Mock handler representing production Azure OpenAI/Copilot integration
-async function processCopilotHeuristics(data) {
-  // Format to standard Indian Currency Format for clean AI context parsing
-  const formattedBudget = new Intl.NumberFormat('en-IN', { 
-    style: 'currency', 
-    currency: 'INR', 
-    maximumFractionDigits: 0 
-  }).format(data.projectCapitalAllocation);
+// ── Rule-based model selection ────────────────────────────────────────────────
+// This logic is deterministic and never touches the AI.
+// The AI only generates the human-readable justification for whichever
+// model this function selects.
+function determineProcurementModel(data) {
+  const { supplierDensity, allocationTimeline, materialClassification } = data;
 
-  // Core business intelligence mapping matching wireframe logic
+  if (supplierDensity === 'Single Vendor') {
+    return {
+      recommendedModel : 'DIRECT SOLE-SOURCE PROCUREMENT NEGOTIATION',
+      modelType        : 'SOLE-SOURCE',
+      allocationFit    : 98,
+    };
+  }
+
+  if (allocationTimeline === 'Urgent / Emergency Needs') {
+    return {
+      recommendedModel : 'DUTCH REVERSE AUCTION (ACCELERATED SETTLEMENT)',
+      modelType        : 'DUTCH',
+      allocationFit    : 89,
+    };
+  }
+
+  if (materialClassification === 'Highly Specialized / Proprietary Equipment') {
+    return {
+      recommendedModel : 'JAPANESE REVERSE AUCTION (SEALED MULTI-STAGE COHORT)',
+      modelType        : 'JAPANESE',
+      allocationFit    : 85,
+    };
+  }
+
+  // Default — broadest market, standard conditions
   return {
-    recommendedModel: "ENGLISH REVERSE AUCTION (WITH RANK-BASED VISIBILITY)",
-    allocationFit: 94,
-    justification: `Given the ${formattedBudget} allocation budget and standard 1-month timeline, the system validates an English Reverse Auction. By enforcing strict Rank-Only visibility on your suppliers, you actively prevent market bid-shadowing. Vendors must bid aggressively against their own internal cost floor to achieve Rank #1 status.`
+    recommendedModel : 'ENGLISH REVERSE AUCTION (WITH RANK-BASED VISIBILITY)',
+    modelType        : 'ENGLISH',
+    allocationFit    : 94,
   };
 }
 
+// ── Controller ────────────────────────────────────────────────────────────────
 const createAssessment = async (req, res) => {
   try {
     const inputData = req.body;
-    
-    // Process input data against analytical rule parameters
-    const evaluation = await processCopilotHeuristics(inputData);
 
-    const queryText = `
-      INSERT INTO assessments (
-        supplier_density, allocation_timeline, material_classification, 
-        project_capital_allocation, pricing_matrix_status, recommended_model, 
-        allocation_fit_percentage, ai_justification
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id;
-    `;
+    // Step 1: Determine the procurement model via rules
+    const { recommendedModel, modelType, allocationFit } = determineProcurementModel(inputData);
 
-    const values = [
-      inputData.supplierDensity,
-      inputData.allocationTimeline,
-      inputData.materialClassification,
-      inputData.projectCapitalAllocation,
-      inputData.pricingMatrixStatus,
-      evaluation.recommendedModel,
-      evaluation.allocationFit,
-      evaluation.justification
-    ];
+    // Step 2: Generate AI justification (falls back to heuristic if AI unavailable)
+    const justification = await generateCopilotJustification(
+      inputData,
+      recommendedModel,
+      allocationFit
+    );
 
-    const result = await pool.query(queryText, values);
+    // Step 3: Persist to PostgreSQL (best-effort — does not fail the request)
+    let assessmentId   = null;
+    let assessmentDate = new Date().toISOString();
+    try {
+      const queryText = `
+        INSERT INTO assessments (
+          supplier_density,
+          allocation_timeline,
+          material_classification,
+          project_capital_allocation,
+          pricing_matrix_status,
+          recommended_model,
+          allocation_fit_percentage,
+          ai_justification
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, created_at;
+      `;
+      const values = [
+        inputData.supplierDensity,
+        inputData.allocationTimeline,
+        inputData.materialClassification,
+        inputData.projectCapitalAllocation,
+        inputData.pricingMatrixStatus,
+        recommendedModel,
+        allocationFit,
+        justification,
+      ];
+      const result   = await pool.query(queryText, values);
+      assessmentId   = result.rows[0].id;
+      assessmentDate = result.rows[0].created_at;
+    } catch (dbErr) {
+      // DB offline — log and continue (frontend will still receive the result)
+      console.warn('[Assessment] DB insert skipped (PostgreSQL offline):', dbErr.message);
+    }
 
+    // Step 4: Return full result to frontend
     return res.status(201).json({
-      success: true,
-      assessmentId: result.rows[0].id,
-      data: evaluation
+      success      : true,
+      assessmentId : assessmentId,
+      data: {
+        recommendedModel,
+        modelType,
+        allocationFit,
+        justification,
+        supplierDensity          : inputData.supplierDensity,
+        allocationTimeline       : inputData.allocationTimeline,
+        materialClassification   : inputData.materialClassification,
+        projectCapitalAllocation : inputData.projectCapitalAllocation,
+        pricingMatrixStatus      : inputData.pricingMatrixStatus,
+        created_at               : assessmentDate,
+      },
     });
 
   } catch (error) {
-    console.error('Controller Error execution bottleneck:', error);
+    console.error('[Assessment] Controller error:', error);
     return res.status(500).json({
-      success: false,
-      message: 'Critical error isolated within backend runtime operations.'
+      success : false,
+      message : 'An error occurred while processing the procurement assessment.',
     });
   }
 };
